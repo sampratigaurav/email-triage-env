@@ -176,18 +176,18 @@ async def run_episode(episode_num: int) -> dict:
             breakdown = getattr(result.observation, "reward_breakdown", None)
             feedback  = result.observation.feedback
 
-            # [STEP] log
+            # [STEP] log — strictly ordered: event, step, action, reward, done first
             print(json.dumps({
                 "event":            "[STEP]",
-                "episode":          episode_num,
                 "step":             step,
-                "difficulty":       current_difficulty,
                 "action":           action_dict,
                 "reward":           round(reward, 3),
+                "done":             result.done,
+                "episode":          episode_num,
+                "difficulty":       current_difficulty,
                 "reward_breakdown": breakdown,
                 "score":            result.observation.score,
                 "feedback":         feedback,
-                "done":             result.done,
             }), flush=True)
 
             # Track details for markdown table
@@ -231,11 +231,11 @@ async def run_episode(episode_num: int) -> dict:
 async def main():
     # [START] log
     print(json.dumps({
-        "event":       "[START]",
-        "env":         "email_triage_env",
-        "model":       MODEL_NAME,
+        "event":        "[START]",
+        "env":          "email_triage_env",
+        "model":        MODEL_NAME,
         "num_episodes": NUM_EPISODES,
-        "timestamp":   time.time(),
+        "timestamp":    time.time(),
     }), flush=True)
 
     episode_summaries = []
