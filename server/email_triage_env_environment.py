@@ -6,7 +6,10 @@ from openenv.core.env_server.types import State
 
 try:
     from ..models import EmailTriageAction, EmailTriageObservation
-except ImportError:
+except (ModuleNotFoundError, ImportError):
+    import sys
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from models import EmailTriageAction, EmailTriageObservation
 
 
@@ -80,7 +83,7 @@ TASKS = {
         },
         {
             "email_subject": "Client complaint - order delayed",
-            "email_body": "I placed order #8823 two weeks ago and it still hasn't arrived. This is unacceptable. I need an update immediately.",
+            "email_body": "I placed order #8823 two weeks ago and it still has not arrived. This is unacceptable. I need an update immediately.",
             "sender": "angry.customer@gmail.com",
             "correct_classification": "urgent",
             "correct_priority": 4,
@@ -125,7 +128,7 @@ TASKS = {
         },
         {
             "email_subject": "Fwd: Fwd: Fwd: Funny cat video",
-            "email_body": "Haha you have to see this! [forwarded 4 times] Original message: check out this hilarious compilation of cats falling off things.",
+            "email_body": "Haha you have to see this! Forwarded 4 times. Original message: check out this hilarious compilation of cats falling off things.",
             "sender": "uncle.bob@hotmail.com",
             "correct_classification": "spam",
             "correct_priority": 1,
@@ -204,66 +207,56 @@ class EmailTriageEnvironment(Environment):
         return self._state
 
     def _grade_action(self, action: EmailTriageAction, task: dict) -> float:
-    score = 0.0
+        score = 0.0
 
-    # 1. Classification — worth 0.5
-    given_class = action.classification.lower().strip()
-    correct_class = task["correct_classification"]
+        # Classification worth 0.5
+        given_class = action.classification.lower().strip()
+        correct_class = task["correct_classification"]
 
-    if given_class == correct_class:
-        score += 0.5
-    else:
-        # Partial credit for related misclassifications
-        # urgent/normal are closer than spam/newsletter
-        partial_credit_pairs = [
-            ("urgent", "normal"),
-            ("normal", "urgent"),
-        ]
-        if (given_class, correct_class) in partial_credit_pairs:
-            score += 0.15
+        if given_class == correct_class:
+            score += 0.5
+        else:
+            partial_credit_pairs = [
+                ("urgent", "normal"),
+                ("normal", "urgent"),
+            ]
+            if (given_class, correct_class) in partial_credit_pairs:
+                score += 0.15
 
-    # 2. Priority — worth 0.3
-    correct_p = task["correct_priority"]
-    try:
-        given_p = max(1, min(5, int(action.priority)))
-    except (ValueError, TypeError):
-        given_p = 3  # default if invalid
+        # Priority worth 0.3
+        correct_p = task["correct_priority"]
+        try:
+            given_p = max(1, min(5, int(action.priority)))
+        except (ValueError, TypeError):
+            given_p = 3
 
-    diff = abs(given_p - correct_p)
-    if diff == 0:
-        score += 0.3
-    elif diff == 1:
-        score += 0.2
-    elif diff == 2:
-        score += 0.1
-    # diff 3+ gets nothing
+        diff = abs(given_p - correct_p)
+        if diff == 0:
+            score += 0.3
+        elif diff == 1:
+            score += 0.2
+        elif diff == 2:
+            score += 0.1
 
-    # 3. Reply quality — worth 0.2
-    needs_reply = task.get("needs_reply", False)
-    reply = action.suggested_reply.strip()
-    gave_reply = reply.lower() != "no_reply" and len(reply) > 5
+        # Reply quality worth 0.2
+        needs_reply = task.get("needs_reply", False)
+        reply = action.suggested_reply.strip()
+        gave_reply = reply.lower() != "no_reply" and len(reply) > 5
 
-    if needs_reply and gave_reply:
-        score += 0.1  # base credit for attempting
-
-        # Check reply length — too short replies get less credit
-        if len(reply) > 20:
+        if needs_reply and gave_reply:
+            score += 0.1
+            if len(reply) > 20:
+                score += 0.05
+            required_keywords = task.get("required_reply_keywords", [])
+            if required_keywords:
+                reply_lower = reply.lower()
+                matched = sum(1 for kw in required_keywords if kw in reply_lower)
+                score += 0.05 * (matched / len(required_keywords))
+            else:
+                score += 0.05
+        elif not needs_reply and not gave_reply:
+            score += 0.2
+        elif not needs_reply and gave_reply:
             score += 0.05
 
-        # Check for required keywords
-        required_keywords = task.get("required_reply_keywords", [])
-        if required_keywords:
-            reply_lower = reply.lower()
-            matched = sum(1 for kw in required_keywords if kw in reply_lower)
-            keyword_score = 0.05 * (matched / len(required_keywords))
-            score += keyword_score
-        else:
-            score += 0.05  # full reply credit for non-keyword tasks
-
-    elif not needs_reply and not gave_reply:
-        score += 0.2  # correctly identified no reply needed
-
-    elif not needs_reply and gave_reply:
-        score += 0.05  # small credit — at least they tried
-
-    return round(min(score, 1.0), 2)
+        return round(min(score, 1.0), 2)
