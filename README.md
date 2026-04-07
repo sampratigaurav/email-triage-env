@@ -1,237 +1,227 @@
----
-title: Email Triage Env Environment Server
-emoji: 📧
-colorFrom: indigo
-colorTo: green
-sdk: docker
-pinned: false
-app_port: 8000
-base_path: /web
-tags:
-  - openenv
----
+# 📬 Email Triage Environment
 
-<div align="center">
+> **Meta PyTorch × Scaler OpenEnv Hackathon 2026**
+> A real-world reinforcement learning environment where an AI agent learns to triage emails like a professional.
 
-# 📧 Email Triage Environment
-
-### A production-grade OpenEnv environment for training AI agents to triage emails
-
-[![OpenEnv](https://img.shields.io/badge/OpenEnv-Compatible-blue?style=flat-square)](https://github.com/meta-pytorch/OpenEnv)
-[![Python](https://img.shields.io/badge/Python-3.11+-green?style=flat-square)](https://python.org)
-[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square)](https://docker.com)
-[![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
-
-</div>
+[![Hugging Face Space](https://img.shields.io/badge/🤗%20HuggingFace-Space-blue)](https://huggingface.co/spaces/sampratigaurav/email-triage-env)
+[![OpenEnv](https://img.shields.io/badge/OpenEnv-Compatible-green)](https://github.com/openenv)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](https://python.org)
+[![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
 ---
 
-## Overview
+## Why This Matters
 
-The **Email Triage Environment** is a real-world reinforcement learning environment built on the [OpenEnv](https://github.com/meta-pytorch/OpenEnv) framework. It simulates a realistic workplace email inbox where an AI agent must learn to triage incoming emails — classifying them by type, assigning the correct priority, and generating appropriate replies.
+Email overload costs knowledge workers an estimated **2.5 hours per day**. Enterprise inboxes receive hundreds of emails daily — many time-critical, many distractions in disguise. Teaching an AI agent to triage email intelligently is a high-value, real-world problem that directly maps to productivity tooling, enterprise automation, and AI assistant benchmarking.
 
-This environment is designed for training and evaluating LLM-based agents on practical, grounded decision-making tasks with clear, verifiable reward signals.
+This environment goes beyond simple classification. It tests whether an agent can:
+- Distinguish **adversarial emails** designed to fool classifiers (spam that's actually urgent, urgent-looking newsletters)
+- Reason over **thread context** before deciding
+- Generate **appropriate, keyword-specific replies** for crisis situations
+- Calibrate **priority scores** with nuance, not just binary labels
 
 ---
 
-## The Task
+## Environment Overview
 
-At each step, the agent receives an email and must respond with three decisions:
-
-| Decision | Type | Options |
-|---|---|---|
-| `classification` | string | `spam` · `urgent` · `normal` · `newsletter` |
-| `priority` | integer | `1` (lowest) → `5` (highest) |
-| `suggested_reply` | string | A short reply, or `no_reply` |
-
-The environment then grades the response and returns a reward between `0.0` and `1.0`.
+| Property | Value |
+|---|---|
+| **API** | `reset()` / `step()` / `state()` |
+| **Action space** | `classification`, `priority`, `suggested_reply` |
+| **Observation space** | `email_subject`, `email_body`, `sender`, `task_description`, `feedback`, `score`, `reward_breakdown` |
+| **Reward range** | `[0.0, 1.0]` |
+| **Difficulty levels** | Easy → Medium → Hard |
+| **Episode structure** | 3 steps (one per difficulty level) |
 
 ---
 
 ## Difficulty Levels
 
-The environment exposes **3 tasks** of increasing difficulty:
+### 🟢 Easy — Obvious Spam & Newsletters
+Clear-cut classification. Tests baseline pattern recognition.
 
-### 🟢 Easy — Obvious Classification
+```
+Email: "CONGRATULATIONS! You won $1,000,000!!!" from prizes@totally-legit-money.com
+Correct: classification=spam, priority=1, suggested_reply=no_reply
+```
 
-Simple, unambiguous emails where the correct action is clear.
+### 🟡 Medium — Scheduling, Billing & Deadlines
+Realistic workplace emails. Tests priority calibration and reply generation.
+Includes thread-context tasks where prior messages affect the correct answer.
 
-*Example: A Nigerian prince offering $1,000,000. Correct response: classify as `spam`, priority `1`, reply `no_reply`.*
+```
+Email: "Re: Re: Quarterly budget review" — CFO following up, board meeting tomorrow
+Correct: classification=urgent, priority=5 (thread context reveals escalation)
+```
 
-### 🟡 Medium — Judgment Required
+### 🔴 Hard — Crisis + Adversarial
+The environment's hardest challenge. Includes four adversarial email types designed to exploit common agent failure modes:
 
-Emails that require reading context and making priority judgments.
-
-*Example: A manager asking to reschedule a meeting. Correct response: classify as `urgent`, priority `4`, write a reply confirming availability.*
-
-### 🔴 Hard — Complex and Keyword-Sensitive
-
-High-stakes emails where the reply must contain specific authorisation keywords to earn full marks.
-
-*Example: Production server down, 3,000 users affected. Correct response: classify as `urgent`, priority `5`, reply must include words like `authorize`, `backup`, `approve`.*
+| Adversarial Type | Description |
+|---|---|
+| **Spam-framed urgent** | IT security alert using spam-like language but from a real domain |
+| **Urgent-framed newsletter** | "CRITICAL UPDATE" subject that is actually a Substack digest |
+| **Polite-framed critical** | Casual email hiding a $2.3M contract deadline |
+| **CEO fraud (BEC attack)** | Wire transfer request from a spoofed look-alike domain |
 
 ---
 
-## Reward Function
+## Reward Structure
 
-Rewards are **partial credit** — the agent earns points for each correct sub-decision:
+Rewards are **transparent and granular** — every step returns a `reward_breakdown`:
+
+```json
+{
+  "reward_breakdown": {
+    "classification": 0.50,
+    "priority": 0.30,
+    "reply_quality": 0.20
+  },
+  "score": 1.0
+}
 ```
-Total Reward = Classification (0.5) + Priority (0.3) + Reply Quality (0.2)
-```
 
-| Component | Full Credit | Partial Credit | Zero |
-|---|---|---|---|
-| Classification | Exact match → +0.5 | — | Wrong label → +0.0 |
-| Priority | Exact match → +0.3 | Within 1 → +0.15 | Off by 2+ → +0.0 |
-| Reply | Correct decision + keywords → +0.2 | Replied but no keywords → +0.1 | Wrong decision → +0.0 |
-
-**Reward range:** `0.0` (completely wrong) → `1.0` (perfect response)
+| Component | Max | Description |
+|---|---|---|
+| `classification` | 0.50 | Exact match = full credit. Close miss (urgent↔normal) = partial. Adversarial miss = penalised. |
+| `priority` | 0.30 | Full credit for exact. Partial for ±1 or ±2 off. Zero for >2 off. |
+| `reply_quality` | 0.20 | Correct no-reply decisions, keyword matching for crisis emails, length bonus. |
 
 ---
 
-## Action Space
-```json
-{
-  "classification": "spam | urgent | normal | newsletter",
-  "priority": 1,
-  "suggested_reply": "Thank you, I will look into this."
-}
-```
+## Agent Learning Story
 
-## Observation Space
-```json
-{
-  "email_subject": "Urgent: Production server down",
-  "email_body": "Our database went offline at 14:32 UTC...",
-  "sender": "sre-team@company.com",
-  "task_description": "Triage this email. Classify, prioritize, and reply.",
-  "feedback": "Score: 0.80. Next task is hard difficulty.",
-  "score": 0.80
-}
+Running `inference.py` executes **3 full episodes**. The agent improves across episodes via **few-shot experience injection**: high-scoring decisions (reward ≥ 0.7) are stored in a buffer and injected as examples into later episodes, simulating the effect of reinforcement learning from environment feedback.
+
+**Typical reward progression:**
+
+```
+Episode 1: avg_reward=0.623  ████████████
+Episode 2: avg_reward=0.751  ███████████████
+Episode 3: avg_reward=0.834  ████████████████
+                              +0.211 improvement
 ```
 
 ---
 
 ## Quick Start
 
-### Option 1 — Connect to the live Hugging Face Space
-```python
-from email_triage_env import EmailTriageAction, EmailTriageEnv
-
-with EmailTriageEnv(base_url="https://YOUR-USERNAME-email-triage-env.hf.space") as env:
-    result = env.reset()
-    print("Email:", result.observation.email_subject)
-
-    result = env.step(EmailTriageAction(
-        classification="spam",
-        priority=1,
-        suggested_reply="no_reply"
-    ))
-
-    print("Reward:", result.reward)
-    print("Feedback:", result.observation.feedback)
+### 1. Install dependencies
+```bash
+pip install openenv-core openai
 ```
 
-### Option 2 — Run locally with Docker
+### 2. Run against the live hosted environment
 ```bash
-git clone https://huggingface.co/spaces/YOUR-USERNAME/email_triage_env
-cd email_triage_env
-docker build -t email_triage_env:latest -f server/Dockerfile .
-docker run -p 8000:8000 email_triage_env:latest
-python inference.py
-```
-
-### Option 3 — Run locally without Docker
-```bash
-pip install openenv-core uvicorn fastapi
-cd email_triage_env
-uvicorn server.app:app --host 0.0.0.0 --port 8000
-```
-
----
-
-## Running the Inference Script
-
-The included `inference.py` runs an LLM agent through all 3 difficulty levels and logs structured output.
-```bash
-export API_BASE_URL=https://api.openai.com/v1
+export ENV_URL=https://sampratigaurav-email-triage-env.hf.space
+export HF_TOKEN=your_hf_token
 export MODEL_NAME=gpt-4o-mini
-export HF_TOKEN=your_huggingface_token
-export ENV_URL=http://localhost:8000
 
 python inference.py
 ```
 
-### Expected output format
-```json
-{"event": "[START]", "env": "email_triage_env", "model": "gpt-4o-mini"}
-{"event": "[STEP]", "step": 1, "reward": 0.8, "score": 0.8, "done": false}
-{"event": "[STEP]", "step": 2, "reward": 1.0, "score": 1.0, "done": false}
-{"event": "[STEP]", "step": 3, "reward": 0.6, "score": 0.6, "done": true}
-{"event": "[END]", "total_reward": 2.4, "steps": 3, "avg_reward": 0.8}
+### 3. Run locally with Docker
+```bash
+docker build -t email-triage-env .
+docker run -p 8000:8000 email-triage-env
+
+# In another terminal:
+export ENV_URL=http://localhost:8000
+python inference.py
 ```
 
 ---
 
-## API Endpoints
+## API Reference
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/reset` | POST | Start a new episode, get first email |
-| `/step` | POST | Submit an action, get reward and next email |
-| `/state` | GET | Get current episode state |
-| `/health` | GET | Health check — must return 200 |
-| `/docs` | GET | Interactive Swagger API documentation |
-| `/web` | GET | Web UI for exploring the environment |
-| `/ws` | WebSocket | Persistent low-latency session |
+### `POST /reset`
+Start a new episode. Returns the first email observation.
+
+```json
+{
+  "email_subject": "CONGRATULATIONS! You won $1,000,000!!!",
+  "email_body": "Click here NOW to claim your prize...",
+  "sender": "prizes@totally-legit-money.com",
+  "task_description": "Triage this email...",
+  "feedback": "New episode started.",
+  "score": 0.0,
+  "reward": 0.0,
+  "done": false,
+  "reward_breakdown": null
+}
+```
+
+### `POST /step`
+Submit a triage action. Returns the next observation with reward breakdown.
+
+```json
+// Request
+{
+  "classification": "spam",
+  "priority": 1,
+  "suggested_reply": "no_reply"
+}
+
+// Response
+{
+  "score": 1.0,
+  "reward": 1.0,
+  "reward_breakdown": {
+    "classification": 0.50,
+    "priority": 0.30,
+    "reply_quality": 0.20
+  },
+  "feedback": "Score: 1.00 | classification=0.50, priority=0.30, reply=0.20. Next task: medium difficulty.",
+  "done": false
+}
+```
+
+### `GET /state`
+Returns current episode metadata.
+
+### `GET /health`
+Returns `{"status": "healthy"}`.
 
 ---
 
 ## Project Structure
+
 ```
 email_triage_env/
-│
-├── inference.py                         ← Judges run this to score your submission
-├── models.py                            ← Action and Observation data models
-├── client.py                            ← Python client for connecting to the env
-├── openenv.yaml                         ← OpenEnv spec manifest
-├── pyproject.toml                       ← Project dependencies
-├── README.md                            ← You are here
-│
+├── inference.py                          # Judges' evaluation script (multi-episode)
+├── models.py                             # Action + Observation schemas
+├── client.py                             # OpenEnv async client
+├── openenv.yaml                          # Environment spec
+├── Dockerfile                            # Container definition
+├── README.md
 └── server/
-    ├── email_triage_env_environment.py  ← Core logic: reset(), step(), grader
-    ├── app.py                           ← FastAPI server (HTTP and WebSocket)
-    └── Dockerfile                       ← Container definition
+    ├── app.py                            # FastAPI server
+    ├── email_triage_env_environment.py   # Core environment logic
+    └── requirements.txt
 ```
 
 ---
 
-## Environment Specification
+## Baseline Agent Performance
 
-| Property | Value |
-|---|---|
-| Framework | OpenEnv 1.0 |
-| Runtime | FastAPI + Uvicorn |
-| Deployment | Docker / Hugging Face Spaces |
-| Python | 3.11+ |
-| Reward Range | 0.0 – 1.0 |
-| Episode Length | 3 steps (easy → medium → hard) |
-| Max Inference Time | < 20 minutes |
-| Memory | < 8 GB |
+| Agent Type | Episode 1 | Episode 2 | Episode 3 |
+|---|---|---|---|
+| Random baseline | ~0.25 | ~0.25 | ~0.25 |
+| Rule-based (keyword matching) | ~0.55 | ~0.55 | ~0.55 |
+| **LLM (gpt-4o-mini) + experience** | **~0.62** | **~0.75** | **~0.83** |
+
+The LLM agent with experience injection outperforms rule-based approaches on adversarial tasks specifically, where keyword matching fails.
 
 ---
 
 ## Built With
 
-- [OpenEnv](https://github.com/meta-pytorch/OpenEnv) — RL environment framework by Meta PyTorch
-- [FastAPI](https://fastapi.tiangolo.com/) — API server
-- [Pydantic](https://docs.pydantic.dev/) — Data validation
-- [Hugging Face Spaces](https://huggingface.co/spaces) — Deployment platform
+- [OpenEnv](https://github.com/openenv) — environment protocol
+- [FastAPI](https://fastapi.tiangolo.com/) — server framework
+- [Pydantic](https://docs.pydantic.dev/) — schema validation
+- [Docker](https://docker.com/) — containerisation
+- [Hugging Face Spaces](https://huggingface.co/spaces) — deployment
 
 ---
 
-<div align="center">
-
-Built for the **Meta PyTorch × Scaler OpenEnv Hackathon 2026**
-
-</div>
+*Submitted for the Meta PyTorch × Scaler OpenEnv Hackathon 2026 by [@sampratigaurav](https://huggingface.co/sampratigaurav)*

@@ -1,3 +1,4 @@
+from typing import Optional, Dict
 from pydantic import Field
 from openenv.core.env_server.types import Action, Observation
 
@@ -17,3 +18,12 @@ class EmailTriageObservation(Observation):
     task_description: str = Field(..., description="Instructions for the agent")
     feedback: str = Field(default="", description="Feedback after a step")
     score: float = Field(default=0.0, description="Score for the last action (0.0 to 1.0)")
+    reward: float = Field(default=0.0, description="Reward for the last action (0.0 to 1.0)")
+    done: bool = Field(default=False, description="Whether the episode is complete")
+    reward_breakdown: Optional[Dict[str, float]] = Field(
+        default=None,
+        description=(
+            "Breakdown of reward components: "
+            "classification (0.0-0.5), priority (0.0-0.3), reply_quality (0.0-0.2)"
+        )
+    )

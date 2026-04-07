@@ -4,35 +4,61 @@ type: space
 runtime: fastapi
 app: server.app:app
 port: 8000
-version: "1.0.0"
+version: "2.0.0"
 description: >
   A real-world email triage environment where an AI agent learns to classify
-  emails, assign priorities, and generate appropriate replies. Includes three
-  difficulty levels: easy (spam detection), medium (scheduling and invoices),
-  and hard (crisis management and complex threading).
+  emails, assign priorities, and generate appropriate replies across three
+  difficulty levels. Features adversarial emails (spam-framed urgent, CEO fraud,
+  polite-framed critical deadlines), thread context reasoning, and granular
+  reward_breakdown per step.
+
 tasks:
   - id: easy_triage
-    description: "Classify obvious spam and newsletter emails"
+    description: "Classify obvious spam and newsletter emails with no reply needed"
     difficulty: easy
+
   - id: medium_triage
-    description: "Triage scheduling and billing emails with correct priority"
+    description: "Triage scheduling, billing, and deadline emails. Includes thread-context tasks where prior messages affect the correct classification."
     difficulty: medium
+
   - id: hard_triage
-    description: "Handle crisis emails requiring keyword-specific replies"
+    description: >
+      Handle crisis emails requiring keyword-specific authorisation replies.
+      Includes four adversarial email types designed to exploit common agent
+      failure modes: spam-framed urgent (IT security alert), urgent-framed
+      newsletter, polite-framed critical deadline ($2.3M contract), and
+      CEO fraud / BEC wire transfer attack.
     difficulty: hard
+
 action_space:
   type: object
   fields:
     classification: "string: one of spam, urgent, normal, newsletter"
     priority: "integer: 1 to 5"
     suggested_reply: "string: short reply text or no_reply"
+
 observation_space:
   type: object
   fields:
     email_subject: "string"
     email_body: "string"
     sender: "string"
-    task_description: "string"
-    feedback: "string"
+    task_description: "string: includes thread context when relevant"
+    feedback: "string: human-readable score breakdown after each step"
     score: "float: 0.0 to 1.0"
+    reward: "float: 0.0 to 1.0"
+    done: "boolean"
+    reward_breakdown: "object: {classification: float, priority: float, reply_quality: float} or null on reset"
+
 reward_range: [0.0, 1.0]
+
+reward_components:
+  classification:
+    max: 0.50
+    description: "Exact match = 0.50. Partial credit for urgent↔normal confusion = 0.15. Adversarial misclassification incurs additional -0.10 penalty."
+  priority:
+    max: 0.30
+    description: "Exact match = 0.30. Off by 1 = 0.20. Off by 2 = 0.10. Off by >2 = 0.00."
+  reply_quality:
+    max: 0.20
+    description: "Correct no-reply decision = 0.20. Reply with required keywords = up to 0.20. Unnecessary reply = 0.05."
