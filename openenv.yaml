@@ -1,0 +1,38 @@
+spec_version: 1
+name: email_triage_env
+type: space
+runtime: fastapi
+app: server.app:app
+port: 8000
+version: "1.0.0"
+description: >
+  A real-world email triage environment where an AI agent learns to classify
+  emails, assign priorities, and generate appropriate replies. Includes three
+  difficulty levels: easy (spam detection), medium (scheduling and invoices),
+  and hard (crisis management and complex threading).
+tasks:
+  - id: easy_triage
+    description: "Classify obvious spam and newsletter emails"
+    difficulty: easy
+  - id: medium_triage
+    description: "Triage scheduling and billing emails with correct priority"
+    difficulty: medium
+  - id: hard_triage
+    description: "Handle crisis emails requiring keyword-specific replies"
+    difficulty: hard
+action_space:
+  type: object
+  fields:
+    classification: "string: one of spam, urgent, normal, newsletter"
+    priority: "integer: 1 to 5"
+    suggested_reply: "string: short reply text or no_reply"
+observation_space:
+  type: object
+  fields:
+    email_subject: "string"
+    email_body: "string"
+    sender: "string"
+    task_description: "string"
+    feedback: "string"
+    score: "float: 0.0 to 1.0"
+reward_range: [0.0, 1.0]
