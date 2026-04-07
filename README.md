@@ -6,7 +6,7 @@ colorTo: green
 sdk: docker
 pinned: false
 license: mit
-short_description: RL environment for email triage — classify, prioritise, reply
+short_description: RL env for email triage — classify, reply
 tags:
   - reinforcement-learning
   - openenv
