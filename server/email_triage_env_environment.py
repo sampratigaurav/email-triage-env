@@ -299,11 +299,12 @@ class EmailTriageEnvironment(Environment):
         # reference prior decisions (mirrors real-world inbox state).
         self._episode_thread: List[Dict[str, Any]] = []
 
-    def reset(self) -> EmailTriageObservation:
+    def reset(self, difficulty: str = "easy") -> EmailTriageObservation:
         self._state = State(episode_id=str(uuid4()), step_count=0)
-        self._difficulty = "easy"
+        start_diff = difficulty if difficulty in DIFFICULTY_LEVELS else "easy"
+        self._difficulty = start_diff
         self._episode_thread = []
-        self._current_task = random.choice(TASKS["easy"])
+        self._current_task = random.choice(TASKS[start_diff])
 
         return self._make_observation(
             task=self._current_task,
