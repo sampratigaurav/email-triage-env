@@ -8,11 +8,12 @@ pinned: false
 license: mit
 short_description: RL env for email triage — classify, reply
 tags:
-  - reinforcement-learning
   - openenv
+  - reinforcement-learning
   - email
   - nlp
   - pytorch
+  - agents
 ---
 
 # 📬 Email Triage Environment

@@ -5,6 +5,9 @@ from typing import List, Dict, Any, Optional
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
 
+# Seed for reproducible task sampling across validation runs
+random.seed(42)
+
 try:
     from ..models import EmailTriageAction, EmailTriageObservation
 except (ModuleNotFoundError, ImportError):
