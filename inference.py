@@ -22,12 +22,12 @@ random.seed(42)
 # ── Configuration ──────────────────────────────────────────────────────────────
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME   = os.environ.get("MODEL_NAME",   "gpt-4o-mini")
-HF_TOKEN     = os.environ.get("HF_TOKEN",     "")
+HF_TOKEN     = os.environ.get("HF_TOKEN")
 ENV_URL      = os.environ.get("ENV_URL",      "https://sampratigaurav-email-triage-env.hf.space")
 NUM_EPISODES = int(os.environ.get("NUM_EPISODES", "3"))
 
 llm = OpenAI(
-    api_key=HF_TOKEN if HF_TOKEN else "dummy-key",
+    api_key=HF_TOKEN,
     base_url=API_BASE_URL,
 )
 
