@@ -1,3 +1,20 @@
+---
+title: Email Triage Environment
+emoji: 📬
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+license: mit
+short_description: RL environment for email triage — classify, prioritise, reply
+tags:
+  - reinforcement-learning
+  - openenv
+  - email
+  - nlp
+  - pytorch
+---
+
 # 📬 Email Triage Environment
 
 > **Meta PyTorch × Scaler OpenEnv Hackathon 2026**
