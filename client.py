@@ -1,13 +1,6 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
-"""Email Triage Env Environment Client."""
+"""Email Triage Environment Client."""
 
 from typing import Dict
-
 from openenv.core import EnvClient
 from openenv.core.client_types import StepResult
 from openenv.core.env_server.types import State
@@ -19,80 +12,52 @@ class EmailTriageEnv(
     EnvClient[EmailTriageAction, EmailTriageObservation, State]
 ):
     """
-    Client for the Email Triage Env Environment.
+    Client for the Email Triage Environment.
 
-    This client maintains a persistent WebSocket connection to the environment server,
-    enabling efficient multi-step interactions with lower latency.
-    Each client instance has its own dedicated environment session on the server.
+    Maintains a persistent WebSocket connection to the environment server,
+    enabling efficient multi-step interactions across a full episode.
 
     Example:
-        >>> # Connect to a running server
-        >>> with EmailTriageEnv(base_url="http://localhost:8000") as client:
-        ...     result = client.reset()
-        ...     print(result.observation.echoed_message)
-        ...
-        ...     result = client.step(EmailTriageAction(message="Hello!"))
-        ...     print(result.observation.echoed_message)
+        async with EmailTriageEnv(base_url="https://sampratigaurav-email-triage-env.hf.space") as env:
+            result = await env.reset()
+            print(result.observation.email_subject)
 
-    Example with Docker:
-        >>> # Automatically start container and connect
-        >>> client = EmailTriageEnv.from_docker_image("email_triage_env-env:latest")
-        >>> try:
-        ...     result = client.reset()
-        ...     result = client.step(EmailTriageAction(message="Test"))
-        ... finally:
-        ...     client.close()
+            action = EmailTriageAction(
+                classification="spam",
+                priority=1,
+                suggested_reply="no_reply"
+            )
+            result = await env.step(action)
+            print(result.reward)
     """
 
     def _step_payload(self, action: EmailTriageAction) -> Dict:
-        """
-        Convert EmailTriageAction to JSON payload for step message.
-
-        Args:
-            action: EmailTriageAction instance
-
-        Returns:
-            Dictionary representation suitable for JSON encoding
-        """
         return {
-            "message": action.message,
+            "classification":  action.classification,
+            "priority":        action.priority,
+            "suggested_reply": action.suggested_reply,
         }
 
     def _parse_result(self, payload: Dict) -> StepResult[EmailTriageObservation]:
-        """
-        Parse server response into StepResult[EmailTriageObservation].
-
-        Args:
-            payload: JSON response data from server
-
-        Returns:
-            StepResult with EmailTriageObservation
-        """
-        obs_data = payload.get("observation", {})
+        obs_data = payload.get("observation", payload)
         observation = EmailTriageObservation(
-            echoed_message=obs_data.get("echoed_message", ""),
-            message_length=obs_data.get("message_length", 0),
-            done=payload.get("done", False),
-            reward=payload.get("reward"),
-            metadata=obs_data.get("metadata", {}),
+            email_subject=obs_data.get("email_subject", ""),
+            email_body=obs_data.get("email_body", ""),
+            sender=obs_data.get("sender", ""),
+            task_description=obs_data.get("task_description", ""),
+            feedback=obs_data.get("feedback", ""),
+            score=obs_data.get("score", 0.0),
+            reward=obs_data.get("reward", 0.0),
+            done=obs_data.get("done", False),
+            reward_breakdown=obs_data.get("reward_breakdown"),
         )
-
         return StepResult(
             observation=observation,
-            reward=payload.get("reward"),
-            done=payload.get("done", False),
+            reward=payload.get("reward", obs_data.get("reward", 0.0)),
+            done=payload.get("done", obs_data.get("done", False)),
         )
 
     def _parse_state(self, payload: Dict) -> State:
-        """
-        Parse server response into State object.
-
-        Args:
-            payload: JSON response from state request
-
-        Returns:
-            State object with episode_id and step_count
-        """
         return State(
             episode_id=payload.get("episode_id"),
             step_count=payload.get("step_count", 0),

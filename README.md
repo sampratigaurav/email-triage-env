@@ -141,10 +141,10 @@ python inference.py
 ### 3. Run locally with Docker
 ```bash
 docker build -t email-triage-env .
-docker run -p 8000:8000 email-triage-env
+docker run -p 7860:7860 email-triage-env
 
 # In another terminal:
-export ENV_URL=http://localhost:8000
+export ENV_URL=http://localhost:7860
 python inference.py
 ```
 
@@ -242,4 +242,4 @@ The LLM agent with experience injection outperforms rule-based approaches on adv
 
 ---
 
-*Submitted for the Meta PyTorch × Scaler OpenEnv Hackathon 2026 by [@sampratigaurav](https://huggingface.co/sampratigaurav)*
+*Submitted for the Meta PyTorch × Scaler OpenEnv Hackathon 2026 by [@sampratigaurav](https://huggingface.co/sampratigaurav) and [@pramatiiii](https://huggingface.co/pramatiiii).*
