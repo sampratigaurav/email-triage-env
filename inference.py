@@ -1,42 +1,73 @@
 """
 Inference script for Email Triage Environment.
-Judges run this file to evaluate the submission.
+Meta PyTorch x Scaler OpenEnv Hackathon 2026.
 
-Runs 3 episodes demonstrating agent learning across episodes.
-Logs output in the required [START] / [STEP] / [END] format.
-
-Dependencies: openai (pre-installed), stdlib only for HTTP.
-No httpx, no local package imports required.
+STDOUT FORMAT (exactly as required by the validator):
+    [START] task=<task_name> env=<benchmark> model=<model_name>
+    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+    [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
 """
 
+import asyncio
 import os
 import json
 import time
 import random
-import asyncio
-import urllib.request
-import urllib.error
-from typing import List
+from typing import List, Optional
+
+from openai import OpenAI
 
 random.seed(42)
 
-# ── Configuration — read at module level (safe, just os.environ.get) ──────────
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME   = os.environ.get("MODEL_NAME",   "gpt-4o-mini")
-HF_TOKEN     = os.environ.get("HF_TOKEN")
-ENV_URL      = os.environ.get("ENV_URL",      "https://sampratigaurav-email-triage-env.hf.space")
-NUM_EPISODES = int(os.environ.get("NUM_EPISODES", "3"))
+# ── Configuration ──────────────────────────────────────────────────────────────
+API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
+MODEL_NAME   = os.getenv("MODEL_NAME",   "gpt-4o-mini")
+HF_TOKEN     = os.getenv("HF_TOKEN")
+ENV_URL      = os.getenv("ENV_URL",      "https://sampratigaurav-email-triage-env.hf.space")
+NUM_EPISODES = int(os.getenv("NUM_EPISODES", "3"))
 
-# NOTE: llm client is created inside main() so that HF_TOKEN is guaranteed
-# to be set by the time we initialize it. Creating OpenAI() at module level
-# with api_key=None raises an exception before [START] can be printed.
+TASK_NAME  = "email_triage"
+BENCHMARK  = "email_triage_env"
+MAX_STEPS  = 3   # easy -> medium -> hard
+SUCCESS_THRESHOLD = 0.5
 
 experience_buffer: List[dict] = []
 
 
-# ── HTTP helper — stdlib urllib with retry ────────────────────────────────────
+# ── Required log helpers (exact format from spec) ─────────────────────────────
 
-def http_post_sync(path: str, body: dict, retries: int = 3) -> dict:
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool,
+             error: Optional[str] = None) -> None:
+    error_val = error if error else "null"
+    done_val  = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action} "
+        f"reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float,
+            rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} "
+        f"score={score:.3f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+# ── HTTP helper (stdlib urllib — no external deps) ────────────────────────────
+
+import urllib.request
+import urllib.error
+
+
+def http_post(path: str, body: dict, retries: int = 3) -> dict:
     """Synchronous POST via stdlib urllib with retry for cold-start."""
     url  = ENV_URL.rstrip("/") + path
     data = json.dumps(body).encode("utf-8")
@@ -53,29 +84,15 @@ def http_post_sync(path: str, body: dict, retries: int = 3) -> dict:
         except Exception as e:
             last_err = e
             if attempt < retries - 1:
-                time.sleep(3 * (attempt + 1))
-    raise RuntimeError(f"HTTP POST {path} failed after {retries} attempts: {last_err}")
-
-
-# ── Response helpers ──────────────────────────────────────────────────────────
-
-def get_obs(resp: dict) -> dict:
-    return resp.get("observation") or resp
-
-def get_reward(resp: dict, obs: dict) -> float:
-    r = resp.get("reward") if resp.get("reward") is not None else obs.get("reward")
-    if r is None:
-        r = obs.get("score")
-    return float(r) if r is not None else 0.0
-
-def get_done(resp: dict, obs: dict) -> bool:
-    return bool(resp.get("done") or obs.get("done") or False)
+                time.sleep(4 * (attempt + 1))  # 4s, 8s back-off
+    raise RuntimeError(
+        f"HTTP POST {path} failed after {retries} attempts: {last_err}"
+    )
 
 
 # ── LLM agent ─────────────────────────────────────────────────────────────────
 
-def ask_llm(llm, email_subject: str, email_body: str, sender: str,
-            task_desc: str, episode: int) -> dict:
+def build_prompt(obs: dict, episode: int) -> str:
     few_shot = ""
     if experience_buffer:
         lines = ["\nExamples of high-scoring past decisions:\n"]
@@ -87,26 +104,30 @@ def ask_llm(llm, email_subject: str, email_body: str, sender: str,
             )
         few_shot = "\n".join(lines)
 
-    prompt = (
+    return (
         f"You are an expert email triage assistant. Episode {episode}.\n"
-        f"Task: {task_desc}\n"
+        f"Task: {obs.get('task_description', '')}\n"
         f"{few_shot}\n"
         f"Triage this email:\n"
-        f"From: {sender}\nSubject: {email_subject}\nBody:\n{email_body}\n\n"
+        f"From: {obs.get('sender', '')}\n"
+        f"Subject: {obs.get('email_subject', '')}\n"
+        f"Body:\n{obs.get('email_body', '')}\n\n"
         "Respond ONLY with valid JSON (no markdown, no code fences):\n"
         "{\"classification\": \"spam\", \"priority\": 1, \"suggested_reply\": \"no_reply\"}\n\n"
         "Rules:\n"
         "- classification: spam | urgent | normal | newsletter\n"
         "- priority: integer 1 (lowest) to 5 (highest)\n"
         "- suggested_reply: short string or exactly 'no_reply'\n"
-        "- Urgent emails needing reply: include keywords authorize/confirm/approve\n"
-        "- Spam-like language from internal company domain = urgent, not spam\n"
-        "- Wire transfer from non-company domain = spam (CEO fraud)\n"
+        "- urgent reply needed: include keywords authorize/confirm/approve\n"
+        "- spam-like language from internal company domain = urgent, not spam\n"
+        "- wire transfer from non-company domain = spam (CEO fraud)\n"
     )
 
-    response = llm.chat.completions.create(
+
+def call_llm(client: OpenAI, obs: dict, episode: int) -> dict:
+    response = client.chat.completions.create(
         model=MODEL_NAME,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content": build_prompt(obs, episode)}],
         max_tokens=300,
         temperature=max(0.3 - (episode - 1) * 0.1, 0.05),
     )
@@ -118,192 +139,140 @@ def ask_llm(llm, email_subject: str, email_body: str, sender: str,
     return json.loads(raw)
 
 
-def safe_ask_llm(llm, email_subject: str, email_body: str, sender: str,
-                 task_desc: str, episode: int) -> dict:
+def safe_call_llm(client: OpenAI, obs: dict, episode: int) -> dict:
     try:
-        return ask_llm(llm, email_subject, email_body, sender, task_desc, episode)
+        return call_llm(client, obs, episode)
     except Exception as e:
-        print(json.dumps({"event": "[WARN]",
-                          "message": f"LLM error: {e}, using fallback"}), flush=True)
         return {
             "classification": "normal",
             "priority": 3,
-            "suggested_reply": "Thank you for your email. I will review this shortly.",
+            "suggested_reply": "Thank you for your email. I will review this.",
         }
 
 
-# ── Single episode ─────────────────────────────────────────────────────────────
+# ── Episode runner ─────────────────────────────────────────────────────────────
 
-async def run_episode(llm, episode_num: int) -> dict:
-    """Run one full episode via direct HTTP (stdlib urllib)."""
-    episode_rewards: List[float] = []
-    step_details:    List[dict]  = []
-    step = 0
+async def run_episode(client: OpenAI, episode_num: int) -> dict:
+    """Run one episode via HTTP REST. Returns episode stats."""
+    loop = asyncio.get_running_loop()
     DIFFICULTIES = ["easy", "medium", "hard"]
 
-    loop = asyncio.get_running_loop()
+    rewards: List[float] = []
+    steps_taken = 0
+    score = 0.0
+    success = False
 
-    reset_resp = await loop.run_in_executor(None, http_post_sync, "/reset", {})
-    obs = get_obs(reset_resp)
+    log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
 
-    while True:
-        current_difficulty = DIFFICULTIES[min(step, len(DIFFICULTIES) - 1)]
+    try:
+        # Reset environment
+        reset_resp = await loop.run_in_executor(None, http_post, "/reset", {})
+        obs = reset_resp.get("observation") or reset_resp
 
-        action_dict = safe_ask_llm(
-            llm,
-            email_subject=obs.get("email_subject", ""),
-            email_body=obs.get("email_body", ""),
-            sender=obs.get("sender", ""),
-            task_desc=obs.get("task_description", ""),
-            episode=episode_num,
-        )
+        for step in range(1, MAX_STEPS + 1):
+            action_dict = safe_call_llm(client, obs, episode_num)
 
-        step_body = {
-            "action": {
-                "classification":  action_dict["classification"],
-                "priority":        action_dict["priority"],
-                "suggested_reply": action_dict["suggested_reply"],
+            # Format action string for log (compact, no newlines)
+            action_str = (
+                f"classify={action_dict['classification']},"
+                f"priority={action_dict['priority']},"
+                f"reply={action_dict['suggested_reply'][:30].replace(' ', '_')}"
+            )
+
+            # Step environment
+            step_body = {
+                "action": {
+                    "classification":  action_dict["classification"],
+                    "priority":        action_dict["priority"],
+                    "suggested_reply": action_dict["suggested_reply"],
+                }
             }
-        }
+            step_resp = await loop.run_in_executor(
+                None, http_post, "/step", step_body
+            )
 
-        step_resp = await loop.run_in_executor(
-            None, http_post_sync, "/step", step_body
-        )
+            next_obs  = step_resp.get("observation") or step_resp
+            reward_raw = step_resp.get("reward")
+            if reward_raw is None:
+                reward_raw = next_obs.get("reward") or next_obs.get("score") or 0.0
+            reward = float(reward_raw)
+            done   = bool(step_resp.get("done") or next_obs.get("done") or False)
 
-        step    += 1
-        next_obs = get_obs(step_resp)
-        reward   = get_reward(step_resp, next_obs)
-        done     = get_done(step_resp, next_obs)
-        breakdown = next_obs.get("reward_breakdown")
-        feedback  = next_obs.get("feedback", "")
+            rewards.append(reward)
+            steps_taken = step
 
-        episode_rewards.append(reward)
+            # Store good decisions for few-shot injection
+            if reward >= 0.7:
+                experience_buffer.append({
+                    "subject":        obs.get("email_subject", ""),
+                    "sender":         obs.get("sender", ""),
+                    "classification": action_dict["classification"],
+                    "priority":       action_dict["priority"],
+                    "score":          round(reward, 2),
+                })
 
-        print(json.dumps({
-            "event":            "[STEP]",
-            "step":             step,
-            "action":           action_dict,
-            "reward":           round(reward, 3),
-            "done":             done,
-            "episode":          episode_num,
-            "difficulty":       current_difficulty,
-            "reward_breakdown": breakdown,
-            "score":            float(next_obs.get("score") or reward),
-            "feedback":         feedback,
-        }), flush=True)
+            # Required [STEP] log
+            log_step(step=step, action=action_str, reward=reward,
+                     done=done, error=None)
 
-        step_details.append({
-            "step":           step,
-            "difficulty":     current_difficulty,
-            "subject":        obs.get("email_subject", "")[:50],
-            "classification": action_dict["classification"],
-            "priority":       action_dict["priority"],
-            "reward":         round(reward, 3),
-            "breakdown":      breakdown or {},
-        })
+            obs = next_obs
+            if done:
+                break
 
-        if reward >= 0.7:
-            experience_buffer.append({
-                "subject":        obs.get("email_subject", ""),
-                "sender":         obs.get("sender", ""),
-                "classification": action_dict["classification"],
-                "priority":       action_dict["priority"],
-                "score":          round(reward, 2),
-            })
+        # Score = average reward across steps, clamped to [0, 1]
+        score   = min(max(sum(rewards) / max(len(rewards), 1), 0.0), 1.0)
+        success = score >= SUCCESS_THRESHOLD
 
-        obs = next_obs
-        if done:
-            break
+    except Exception as e:
+        # Emit at least one [STEP] so output parser has something
+        if not rewards:
+            rewards = [0.0]
+            steps_taken = 1
+            log_step(step=1, action="fallback", reward=0.0,
+                     done=True, error=str(e)[:80])
+        score   = 0.0
+        success = False
 
-    total_reward = sum(episode_rewards)
-    avg_reward   = total_reward / max(len(episode_rewards), 1)
+    finally:
+        # Required [END] log — always emitted
+        log_end(success=success, steps=steps_taken,
+                score=score, rewards=rewards)
 
     return {
         "episode":      episode_num,
-        "steps":        step,
-        "total_reward": round(total_reward, 3),
-        "avg_reward":   round(avg_reward, 3),
-        "per_step":     [round(r, 3) for r in episode_rewards],
-        "step_details": step_details,
+        "steps":        steps_taken,
+        "score":        score,
+        "success":      success,
+        "rewards":      rewards,
     }
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-async def main():
-    # ── Init LLM client HERE (not at module level) so HF_TOKEN is available ──
-    from openai import OpenAI
-    llm = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
+async def main() -> None:
+    # OpenAI client init INSIDE main() — HF_TOKEN guaranteed set by this point
+    client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
 
-    print(json.dumps({
-        "event":        "[START]",
-        "env":          "email_triage_env",
-        "model":        MODEL_NAME,
-        "num_episodes": NUM_EPISODES,
-        "timestamp":    time.time(),
-    }), flush=True)
-
-    episode_summaries: List[dict] = []
+    all_scores: List[float] = []
 
     for ep in range(1, NUM_EPISODES + 1):
-
-        print(json.dumps({
-            "event":                  "[EPISODE_START]",
-            "episode":                ep,
-            "experience_buffer_size": len(experience_buffer),
-        }), flush=True)
-
-        try:
-            summary = await run_episode(llm, ep)
-        except Exception as e:
-            print(json.dumps({
-                "event":   "[WARN]",
-                "episode": ep,
-                "message": f"Episode error: {e}",
-            }), flush=True)
-            summary = {
-                "episode": ep, "steps": 0,
-                "total_reward": 0.0, "avg_reward": 0.0,
-                "per_step": [], "step_details": [],
-            }
-
-        episode_summaries.append(summary)
-
-        print(json.dumps({
-            "event":        "[EPISODE_END]",
-            "episode":      ep,
-            "total_reward": summary["total_reward"],
-            "avg_reward":   summary["avg_reward"],
-            "per_step":     summary["per_step"],
-        }), flush=True)
-
+        result = await run_episode(client, ep)
+        all_scores.append(result["score"])
         if ep < NUM_EPISODES:
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
 
-    avg_rewards  = [s["avg_reward"] for s in episode_summaries]
-    improvement  = round(avg_rewards[-1] - avg_rewards[0], 3) if len(avg_rewards) > 1 else 0.0
-    reward_curve = " -> ".join(str(r) for r in avg_rewards)
-
-    print(json.dumps({
-        "event":           "[END]",
-        "total_episodes":  NUM_EPISODES,
-        "reward_curve":    reward_curve,
-        "improvement":     improvement,
-        "episode_details": episode_summaries,
-        "note":            "Agent improves via few-shot experience injection across episodes.",
-    }), flush=True)
-
-    print("\n" + "=" * 65, flush=True)
-    print("  EMAIL TRIAGE AGENT - LEARNING CURVE", flush=True)
-    print("=" * 65, flush=True)
-    for s in episode_summaries:
-        filled = int(s["avg_reward"] * 30)
-        bar    = "#" * filled + "." * (30 - filled)
-        print(f"  Ep {s['episode']}  [{bar}]  {s['avg_reward']:.3f}", flush=True)
+    # Summary bar chart
+    improvement = round(all_scores[-1] - all_scores[0], 3) if len(all_scores) > 1 else 0.0
+    print("\n" + "=" * 60, flush=True)
+    print("  EMAIL TRIAGE - MULTI-EPISODE RESULTS", flush=True)
+    print("=" * 60, flush=True)
+    for i, s in enumerate(all_scores, 1):
+        bar = "#" * int(s * 30) + "." * (30 - int(s * 30))
+        print(f"  Ep {i}  [{bar}]  {s:.3f}", flush=True)
     sign = "+" if improvement >= 0 else ""
-    print(f"\n  Improvement ep1->ep{NUM_EPISODES}: {sign}{improvement:.3f}", flush=True)
-    print(f"  Experience buffer: {len(experience_buffer)} examples", flush=True)
-    print("=" * 65, flush=True)
+    print(f"\n  Improvement: {sign}{improvement:.3f}", flush=True)
+    print(f"  Avg score:   {sum(all_scores)/max(len(all_scores),1):.3f}", flush=True)
+    print("=" * 60, flush=True)
 
 
 if __name__ == "__main__":
