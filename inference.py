@@ -159,7 +159,7 @@ async def run_episode(client: OpenAI, episode_num: int) -> dict:
 
     rewards: List[float] = []
     steps_taken = 0
-    score = 0.0
+    score = 0.001
     success = False
 
     log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
@@ -220,17 +220,18 @@ async def run_episode(client: OpenAI, episode_num: int) -> dict:
                 break
 
         # Score = average reward across steps, clamped to [0, 1]
-        score   = min(max(sum(rewards) / max(len(rewards), 1), 0.0), 1.0)
+        raw_score = sum(rewards) / max(len(rewards), 1)
+        score     = min(max(raw_score, 0.001), 0.999)
         success = score >= SUCCESS_THRESHOLD
 
     except Exception as e:
         # Emit at least one [STEP] so output parser has something
         if not rewards:
-            rewards = [0.0]
+            rewards = [0.001]
             steps_taken = 1
-            log_step(step=1, action="fallback", reward=0.0,
+            log_step(step=1, action="fallback", reward=0.001,
                      done=True, error=str(e)[:80])
-        score   = 0.0
+        score   = 0.001   # strictly > 0 as required
         success = False
 
     finally:
