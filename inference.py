@@ -16,28 +16,28 @@ import random
 import asyncio
 import urllib.request
 import urllib.error
-from typing import List, Optional
-
-from openai import OpenAI
+from typing import List
 
 random.seed(42)
 
-# ── Configuration ──────────────────────────────────────────────────────────────
+# ── Configuration — read at module level (safe, just os.environ.get) ──────────
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME   = os.environ.get("MODEL_NAME",   "gpt-4o-mini")
 HF_TOKEN     = os.environ.get("HF_TOKEN")
 ENV_URL      = os.environ.get("ENV_URL",      "https://sampratigaurav-email-triage-env.hf.space")
 NUM_EPISODES = int(os.environ.get("NUM_EPISODES", "3"))
 
-llm = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
+# NOTE: llm client is created inside main() so that HF_TOKEN is guaranteed
+# to be set by the time we initialize it. Creating OpenAI() at module level
+# with api_key=None raises an exception before [START] can be printed.
 
 experience_buffer: List[dict] = []
 
 
-# ── HTTP helper — stdlib urllib, with retry for cold-start ────────────────────
+# ── HTTP helper — stdlib urllib with retry ────────────────────────────────────
 
 def http_post_sync(path: str, body: dict, retries: int = 3) -> dict:
-    """POST via stdlib urllib with retry. No external dependencies needed."""
+    """Synchronous POST via stdlib urllib with retry for cold-start."""
     url  = ENV_URL.rstrip("/") + path
     data = json.dumps(body).encode("utf-8")
     last_err = None
@@ -49,27 +49,24 @@ def http_post_sync(path: str, body: dict, retries: int = 3) -> dict:
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=60) as resp:
-                raw = resp.read().decode("utf-8")
-                return json.loads(raw)
+                return json.loads(resp.read().decode("utf-8"))
         except Exception as e:
             last_err = e
             if attempt < retries - 1:
-                time.sleep(3 * (attempt + 1))  # back-off: 3s, 6s
+                time.sleep(3 * (attempt + 1))
     raise RuntimeError(f"HTTP POST {path} failed after {retries} attempts: {last_err}")
 
 
-# ── Helpers to safely extract fields from response ────────────────────────────
+# ── Response helpers ──────────────────────────────────────────────────────────
 
 def get_obs(resp: dict) -> dict:
-    """Extract observation dict from reset/step response."""
     return resp.get("observation") or resp
 
-
 def get_reward(resp: dict, obs: dict) -> float:
-    """Extract reward — handles None from server."""
-    r = resp.get("reward") or obs.get("reward") or obs.get("score")
+    r = resp.get("reward") if resp.get("reward") is not None else obs.get("reward")
+    if r is None:
+        r = obs.get("score")
     return float(r) if r is not None else 0.0
-
 
 def get_done(resp: dict, obs: dict) -> bool:
     return bool(resp.get("done") or obs.get("done") or False)
@@ -77,7 +74,7 @@ def get_done(resp: dict, obs: dict) -> bool:
 
 # ── LLM agent ─────────────────────────────────────────────────────────────────
 
-def ask_llm(email_subject: str, email_body: str, sender: str,
+def ask_llm(llm, email_subject: str, email_body: str, sender: str,
             task_desc: str, episode: int) -> dict:
     few_shot = ""
     if experience_buffer:
@@ -104,7 +101,7 @@ def ask_llm(email_subject: str, email_body: str, sender: str,
         "- suggested_reply: short string or exactly 'no_reply'\n"
         "- Urgent emails needing reply: include keywords authorize/confirm/approve\n"
         "- Spam-like language from internal company domain = urgent, not spam\n"
-        "- Wire transfer request from non-company domain = spam (CEO fraud)\n"
+        "- Wire transfer from non-company domain = spam (CEO fraud)\n"
     )
 
     response = llm.chat.completions.create(
@@ -114,7 +111,6 @@ def ask_llm(email_subject: str, email_body: str, sender: str,
         temperature=max(0.3 - (episode - 1) * 0.1, 0.05),
     )
     raw = response.choices[0].message.content.strip()
-    # Strip markdown fences if model adds them
     if raw.startswith("```"):
         raw = "\n".join(
             l for l in raw.split("\n") if not l.strip().startswith("```")
@@ -122,10 +118,10 @@ def ask_llm(email_subject: str, email_body: str, sender: str,
     return json.loads(raw)
 
 
-def safe_ask_llm(email_subject: str, email_body: str, sender: str,
+def safe_ask_llm(llm, email_subject: str, email_body: str, sender: str,
                  task_desc: str, episode: int) -> dict:
     try:
-        return ask_llm(email_subject, email_body, sender, task_desc, episode)
+        return ask_llm(llm, email_subject, email_body, sender, task_desc, episode)
     except Exception as e:
         print(json.dumps({"event": "[WARN]",
                           "message": f"LLM error: {e}, using fallback"}), flush=True)
@@ -138,12 +134,8 @@ def safe_ask_llm(email_subject: str, email_body: str, sender: str,
 
 # ── Single episode ─────────────────────────────────────────────────────────────
 
-async def run_episode(episode_num: int) -> dict:
-    """
-    Run one full episode.
-    HTTP is synchronous (urllib) executed in thread pool — no external deps.
-    Uses asyncio.get_running_loop() (correct for coroutines, py3.10+).
-    """
+async def run_episode(llm, episode_num: int) -> dict:
+    """Run one full episode via direct HTTP (stdlib urllib)."""
     episode_rewards: List[float] = []
     step_details:    List[dict]  = []
     step = 0
@@ -151,15 +143,14 @@ async def run_episode(episode_num: int) -> dict:
 
     loop = asyncio.get_running_loop()
 
-    # ── Reset ──────────────────────────────────────────────────────────────────
     reset_resp = await loop.run_in_executor(None, http_post_sync, "/reset", {})
     obs = get_obs(reset_resp)
 
-    # ── Step loop ──────────────────────────────────────────────────────────────
     while True:
         current_difficulty = DIFFICULTIES[min(step, len(DIFFICULTIES) - 1)]
 
         action_dict = safe_ask_llm(
+            llm,
             email_subject=obs.get("email_subject", ""),
             email_body=obs.get("email_body", ""),
             sender=obs.get("sender", ""),
@@ -188,7 +179,6 @@ async def run_episode(episode_num: int) -> dict:
 
         episode_rewards.append(reward)
 
-        # ── Required [STEP] log ────────────────────────────────────────────────
         print(json.dumps({
             "event":            "[STEP]",
             "step":             step,
@@ -212,7 +202,6 @@ async def run_episode(episode_num: int) -> dict:
             "breakdown":      breakdown or {},
         })
 
-        # Store high-quality decisions for few-shot injection
         if reward >= 0.7:
             experience_buffer.append({
                 "subject":        obs.get("email_subject", ""),
@@ -242,7 +231,10 @@ async def run_episode(episode_num: int) -> dict:
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 async def main():
-    # ── Required [START] log ───────────────────────────────────────────────────
+    # ── Init LLM client HERE (not at module level) so HF_TOKEN is available ──
+    from openai import OpenAI
+    llm = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
+
     print(json.dumps({
         "event":        "[START]",
         "env":          "email_triage_env",
@@ -262,13 +254,12 @@ async def main():
         }), flush=True)
 
         try:
-            summary = await run_episode(ep)
+            summary = await run_episode(llm, ep)
         except Exception as e:
-            # Never crash the whole script — log and use zero rewards
             print(json.dumps({
                 "event":   "[WARN]",
                 "episode": ep,
-                "message": f"Episode failed: {e}",
+                "message": f"Episode error: {e}",
             }), flush=True)
             summary = {
                 "episode": ep, "steps": 0,
@@ -293,7 +284,6 @@ async def main():
     improvement  = round(avg_rewards[-1] - avg_rewards[0], 3) if len(avg_rewards) > 1 else 0.0
     reward_curve = " -> ".join(str(r) for r in avg_rewards)
 
-    # ── Required [END] log ────────────────────────────────────────────────────
     print(json.dumps({
         "event":           "[END]",
         "total_episodes":  NUM_EPISODES,
@@ -303,7 +293,6 @@ async def main():
         "note":            "Agent improves via few-shot experience injection across episodes.",
     }), flush=True)
 
-    # ── Human-readable summary ─────────────────────────────────────────────────
     print("\n" + "=" * 65, flush=True)
     print("  EMAIL TRIAGE AGENT - LEARNING CURVE", flush=True)
     print("=" * 65, flush=True)
@@ -316,21 +305,6 @@ async def main():
     print(f"  Experience buffer: {len(experience_buffer)} examples", flush=True)
     print("=" * 65, flush=True)
 
-    # ── Markdown table ─────────────────────────────────────────────────────────
-    print("\n  STEP DETAILS\n", flush=True)
-    header = f"| {'Ep':>2} | {'Step':>4} | {'Diff':<8} | {'Class':<12} | {'Pri':>3} | {'Reward':>6} |"
-    print(header, flush=True)
-    print("|" + "-"*4 + "|" + "-"*6 + "|" + "-"*10 + "|" + "-"*14 + "|" + "-"*5 + "|" + "-"*8 + "|", flush=True)
-    for s in episode_summaries:
-        for d in s.get("step_details", []):
-            print(
-                f"| {s['episode']:>2} | {d['step']:>4} | {d['difficulty']:<8} "
-                f"| {d['classification']:<12} | {d['priority']:>3} | {d['reward']:>6.3f} |",
-                flush=True,
-            )
-
-
-# ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     asyncio.run(main())
