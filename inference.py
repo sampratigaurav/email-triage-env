@@ -5,7 +5,7 @@ Judges run this file to evaluate the submission.
 Runs 3 episodes to demonstrate agent learning across episodes.
 Logs output in the required [START] / [STEP] / [END] format.
 
-Uses only stdlib (urllib) + openai — no httpx, no local imports needed.
+Uses only stdlib (urllib) + openai. No httpx, no local package imports.
 """
 
 import os
@@ -33,11 +33,11 @@ llm = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
 experience_buffer: List[dict] = []
 
 
-# ── HTTP helper (stdlib only) ──────────────────────────────────────────────────
+# ── HTTP helper (stdlib only, synchronous) ─────────────────────────────────────
 
-def http_post(path: str, body: dict) -> dict:
-    """Synchronous POST using only stdlib urllib."""
-    url  = f"{ENV_URL.rstrip('/')}{path}"
+def http_post_sync(path: str, body: dict) -> dict:
+    """Synchronous POST via stdlib urllib — no external deps required."""
+    url  = ENV_URL.rstrip("/") + path
     data = json.dumps(body).encode("utf-8")
     req  = urllib.request.Request(
         url, data=data,
@@ -53,12 +53,12 @@ def http_post(path: str, body: dict) -> dict:
 def ask_llm(email_subject, email_body, sender, task_desc, episode):
     few_shot_text = ""
     if experience_buffer:
-        examples = experience_buffer[-6:]
         lines = ["\nExamples of correct past decisions:\n"]
-        for ex in examples:
+        for ex in experience_buffer[-6:]:
             lines.append(
                 f"  Email: \"{ex['subject']}\" from {ex['sender']}\n"
-                f"  -> classification={ex['classification']}, priority={ex['priority']}, score={ex['score']}\n"
+                f"  -> classification={ex['classification']}, "
+                f"priority={ex['priority']}, score={ex['score']}\n"
             )
         few_shot_text = "\n".join(lines)
 
@@ -67,15 +67,15 @@ def ask_llm(email_subject, email_body, sender, task_desc, episode):
         f"Task: {task_desc}\n"
         f"{few_shot_text}\n"
         f"Email:\nFrom: {sender}\nSubject: {email_subject}\nBody:\n{email_body}\n\n"
-        "Respond with ONLY valid JSON, no markdown, no explanation:\n"
-        '{{"classification": "spam", "priority": 1, "suggested_reply": "no_reply"}}\n\n'
+        "Respond ONLY with valid JSON, no markdown:\n"
+        "{\"classification\": \"spam\", \"priority\": 1, \"suggested_reply\": \"no_reply\"}\n\n"
         "Rules:\n"
         "- classification: spam, urgent, normal, or newsletter\n"
         "- priority: integer 1-5\n"
         "- suggested_reply: short string or exactly 'no_reply'\n"
-        "- For urgent emails needing reply use keywords: authorize, confirm, approve\n"
-        "- Spam-like language from legit internal domain = urgent\n"
-        "- Wire transfer from spoofed domain = spam\n"
+        "- urgent emails needing reply: use keywords authorize, confirm, approve\n"
+        "- spam-like language from legit internal domain = urgent\n"
+        "- wire transfer from spoofed domain = spam\n"
     )
 
     response = llm.chat.completions.create(
@@ -86,8 +86,9 @@ def ask_llm(email_subject, email_body, sender, task_desc, episode):
     )
     raw = response.choices[0].message.content.strip()
     if raw.startswith("```"):
-        lines = [l for l in raw.split("\n") if not l.strip().startswith("```")]
-        raw = "\n".join(lines).strip()
+        raw = "\n".join(
+            l for l in raw.split("\n") if not l.strip().startswith("```")
+        ).strip()
     return json.loads(raw)
 
 
@@ -96,22 +97,27 @@ def safe_ask_llm(email_subject, email_body, sender, task_desc, episode):
         return ask_llm(email_subject, email_body, sender, task_desc, episode)
     except Exception as e:
         print(json.dumps({"event": "[WARN]", "message": f"LLM error: {e}, using fallback"}), flush=True)
-        return {"classification": "normal", "priority": 3, "suggested_reply": "Thank you, I will review this."}
+        return {
+            "classification": "normal",
+            "priority": 3,
+            "suggested_reply": "Thank you for your email. I will review this.",
+        }
 
 
-# ── Single episode (sync HTTP, wrapped in async) ───────────────────────────────
+# ── Single episode ─────────────────────────────────────────────────────────────
 
 async def run_episode(episode_num: int) -> dict:
-    """Run one full episode. Uses stdlib urllib — no external HTTP deps."""
+    """Run one episode. HTTP calls are sync (urllib) run in executor."""
     episode_rewards: List[float] = []
     step_details: List[dict] = []
     step = 0
     DIFFICULTIES = ["easy", "medium", "hard"]
 
+    # Use get_running_loop() — correct for use inside a coroutine
+    loop = asyncio.get_running_loop()
+
     # Reset
-    reset_resp = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: http_post("/reset", {})
-    )
+    reset_resp = await loop.run_in_executor(None, http_post_sync, "/reset", {})
     obs        = reset_resp.get("observation") or reset_resp
     session_id = reset_resp.get("session_id")
 
@@ -136,19 +142,20 @@ async def run_episode(episode_num: int) -> dict:
         if session_id:
             step_body["session_id"] = session_id
 
-        step_resp = await asyncio.get_event_loop().run_in_executor(
-            None, lambda b=step_body: http_post("/step", b)
+        # Pass body as positional arg to avoid lambda closure issues
+        step_resp = await loop.run_in_executor(
+            None, http_post_sync, "/step", step_body
         )
 
         step    += 1
         next_obs = step_resp.get("observation") or step_resp
-        reward   = (
+        reward   = float(
             step_resp.get("reward")
             or next_obs.get("reward")
             or next_obs.get("score")
             or 0.0
         )
-        done      = step_resp.get("done") or next_obs.get("done") or False
+        done      = bool(step_resp.get("done") or next_obs.get("done") or False)
         breakdown = next_obs.get("reward_breakdown")
         feedback  = next_obs.get("feedback", "")
 
@@ -158,12 +165,12 @@ async def run_episode(episode_num: int) -> dict:
             "event":            "[STEP]",
             "step":             step,
             "action":           action_dict,
-            "reward":           round(float(reward), 3),
+            "reward":           round(reward, 3),
             "done":             done,
             "episode":          episode_num,
             "difficulty":       current_difficulty,
             "reward_breakdown": breakdown,
-            "score":            next_obs.get("score", reward),
+            "score":            float(next_obs.get("score") or reward),
             "feedback":         feedback,
         }), flush=True)
 
@@ -173,7 +180,7 @@ async def run_episode(episode_num: int) -> dict:
             "subject":        obs.get("email_subject", "")[:45],
             "classification": action_dict["classification"],
             "priority":       action_dict["priority"],
-            "reward":         round(float(reward), 3),
+            "reward":         round(reward, 3),
             "breakdown":      breakdown or {},
         })
 
@@ -183,7 +190,7 @@ async def run_episode(episode_num: int) -> dict:
                 "sender":         obs.get("sender", ""),
                 "classification": action_dict["classification"],
                 "priority":       action_dict["priority"],
-                "score":          round(float(reward), 2),
+                "score":          round(reward, 2),
             })
 
         obs = next_obs
@@ -197,7 +204,7 @@ async def run_episode(episode_num: int) -> dict:
         "steps":        step,
         "total_reward": round(total_reward, 3),
         "avg_reward":   round(avg_reward, 3),
-        "per_step":     [round(float(r), 3) for r in episode_rewards],
+        "per_step":     [round(r, 3) for r in episode_rewards],
         "step_details": step_details,
     }
 
@@ -248,7 +255,6 @@ async def main():
         "note":            "Agent improves via few-shot experience injection across episodes.",
     }), flush=True)
 
-    # Human-readable bar chart
     print("\n" + "=" * 65, flush=True)
     print("  EMAIL TRIAGE AGENT - LEARNING CURVE", flush=True)
     print("=" * 65, flush=True)
